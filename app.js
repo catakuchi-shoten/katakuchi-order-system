@@ -2055,6 +2055,16 @@ const STOCK_OUT_SUPPLIER_OPTIONS = [...STOCK_SUPPLIERS, ...STOCK_OUT_ONLY_SUPPLI
 // 出庫記録フォームで最初から選ばれている仕入れ先。通常の出庫は拓人の牡蠣がほとんどのため。
 const STOCK_OUT_DEFAULT_SUPPLIER = '拓人';
 
+// カタクチの冷凍庫の在庫がなくなり、この日以降の配達分の牡蠣は拓人指ヶ浜から直接出荷している。
+// この日以降の店舗配達分で仕入れ先が未記録のものは、拓人ではなく拓人指ヶ浜から出たものとして扱い、
+// 冷凍庫の在庫からは引かない(冷凍庫から出した分は「配達の仕入れ先」で拓人・カタクチなどを記録する)。
+// 冷凍庫からの配達に戻すときは、この日付を変える(または遠い将来の日付にする)。
+const DIRECT_SHIP_FROM_DATE = '2026-11-13';
+const DIRECT_SHIP_SUPPLIER = '拓人指ヶ浜';
+function defaultStoreSupplierFor(date) {
+  return date >= DIRECT_SHIP_FROM_DATE ? DIRECT_SHIP_SUPPLIER : STOCK_OUT_DEFAULT_SUPPLIER;
+}
+
 // 牡蠣の入庫・出庫を記録した人。プルダウンで選ばせることで、表記ゆれ・入力の手間を減らす。
 const STAFF_NAMES = ['庄子達広', '沼倉まゆ子', '遠藤克'];
 const REGISTERED_BY_STORAGE_KEY = 'katakuchiRegisteredBy';
@@ -2668,10 +2678,30 @@ async function computeKakiStockBalance(asOfDate) {
       outOnlyStoreByDate[key].m += Number(r.m_boxes) || 0;
     });
   // shippedByDate: 全体在庫の計算に使う「この冷凍庫から実際に出た分」。
+  // 直送(DIRECT_SHIP_FROM_DATE以降)の日は、冷凍庫の仕入れ先(拓人・カタクチなど)を記録した分だけが
+  // 冷凍庫から出たものとし、それ以外(未記録・指ヶ浜)はすべて冷凍庫の外から出たものとして扱う。
+  const managedStoreByDate = {};
+  internalOutRowsUpToDate
+    .filter((r) => r.purpose === 'store' && STOCK_SUPPLIERS.includes(r.supplier))
+    .forEach((r) => {
+      const key = r.out_date;
+      if (!managedStoreByDate[key]) managedStoreByDate[key] = { mixed: 0, s: 0, m: 0 };
+      managedStoreByDate[key].mixed += Number(r.mixed_boxes) || 0;
+      managedStoreByDate[key].s += Number(r.s_boxes) || 0;
+      managedStoreByDate[key].m += Number(r.m_boxes) || 0;
+    });
   const shippedByDate = {};
   Object.keys(shippedByDateRaw).forEach((key) => {
     const raw = shippedByDateRaw[key];
-    const outOnly = outOnlyStoreByDate[key] || { mixed: 0, s: 0, m: 0 };
+    let outOnly = outOnlyStoreByDate[key] || { mixed: 0, s: 0, m: 0 };
+    if (key >= DIRECT_SHIP_FROM_DATE) {
+      const managed = managedStoreByDate[key] || { mixed: 0, s: 0, m: 0 };
+      outOnly = {
+        mixed: Math.max(raw.mixed - managed.mixed, 0),
+        s: Math.max(raw.s - managed.s, 0),
+        m: Math.max(raw.m - managed.m, 0),
+      };
+    }
     shippedByDate[key] = {
       mixed: raw.mixed - Math.min(outOnly.mixed, raw.mixed),
       s: raw.s - Math.min(outOnly.s, raw.s),
@@ -3349,6 +3379,8 @@ async function renderStockBalancePage() {
       // 自動的に差し引く(牡蠣の仕入れはほぼ拓人のため)。他の仕入れ先(勝又商店・カタクチ)から
       // 出た分は、これまで通り出庫記録で明示的に記録すれば正しくそちらから引かれる。
       Object.keys(shippedByDateRaw).forEach((d) => {
+        // 直送の日の未記録分は拓人指ヶ浜から出たもの(在庫管理の対象外)なので、どこからも引かない。
+        if (defaultStoreSupplierFor(d) !== STOCK_OUT_DEFAULT_SUPPLIER) return;
         const shipped = shippedByDateRaw[d];
         const attributed = attributedStoreByDate[d] || { mixed: 0, s: 0, m: 0 };
         const unrecorded = {
@@ -3467,7 +3499,7 @@ async function renderStockBalancePage() {
         </div>
         <div class="card">
           <h2>仕入れ先ごとの残り(${formatDateJp(asOfDate)}時点)</h2>
-          <p class="hint">出庫記録で仕入れ先を指定した分に加えて、店舗配達分のうち仕入れ先が未記録の日は標準で拓人として計算しています(牡蠣の仕入れはほぼ拓人のため)。実際に他の仕入れ先(勝又商店・カタクチ)から出した場合は、出庫記録で明示的に記録してください。</p>
+          <p class="hint">出庫記録で仕入れ先を指定した分に加えて、店舗配達分のうち仕入れ先が未記録の日は、${formatDateJp(DIRECT_SHIP_FROM_DATE)}より前は拓人、それ以降は拓人指ヶ浜からの直送(冷凍庫からは引かない)として計算しています。冷凍庫から出した分があれば、出庫記録で拓人・カタクチなどを記録してください。</p>
           <ul class="recent-list">${supplierRows}</ul>
         </div>
         ${overRecordedHtml}`;
@@ -4038,7 +4070,7 @@ async function renderStockDayPage() {
 
       shippedCardEl.innerHTML = `
         <h2>受注システムの出荷実績(自動計算)</h2>
-        <p class="hint">各店舗の発注データから自動計算した実際の出荷数です。ここは直接編集できません。記録がなければ標準ですべて拓人の牡蠣として計算されるので、通常は下の「出庫元を修正」で何か記録する必要はありません。他の仕入れ先から出した場合だけ記録してください。</p>
+        <p class="hint">各店舗の発注データから自動計算した実際の出荷数です。ここは直接編集できません。記録がなければ標準ですべて${escapeHtml(defaultStoreSupplierFor(dateStr))}の牡蠣として計算されるので、通常は下の「出庫元を修正」で何か記録する必要はありません。他の仕入れ先から出した場合だけ記録してください。</p>
         <ul class="recent-list">
           <li><span class="recent-date">店舗配送</span><span class="oyster-qty">${stockCompactQty(
             truckTotal.mixed,
