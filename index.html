@@ -162,6 +162,13 @@
   .stock-calendar > .cal-list-wrap {
     grid-column: 1 / -1;
   }
+  .alloc-table td { min-width: 108px; }
+  .alloc-table td:first-child { min-width: 72px; }
+  .alloc-qty { font-weight: 700; margin-bottom: 4px; }
+  .alloc-in { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; color: var(--hint); margin: 2px 0; }
+  .alloc-in input { width: 48px; padding: 4px 6px; font-size: 14px; }
+  .alloc-raw { margin-top: 4px; font-weight: 700; }
+  .alloc-short { color: var(--danger); }
   .cal-list-wrap {
     overflow-x: auto;
   }
@@ -1096,7 +1103,7 @@
 </head>
 <body>
 <div id="app"></div>
-<script src="storage.js?v=202611131400"></script>
-<script src="app.js?v=202611131400"></script>
+<script src="storage.js?v=202611161200"></script>
+<script src="app.js?v=202611161200"></script>
 </body>
 </html>

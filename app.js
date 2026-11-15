@@ -2055,11 +2055,31 @@ const STOCK_OUT_SUPPLIER_OPTIONS = [...STOCK_SUPPLIERS, ...STOCK_OUT_ONLY_SUPPLI
 // 出庫記録フォームで最初から選ばれている仕入れ先。通常の出庫は拓人の牡蠣がほとんどのため。
 const STOCK_OUT_DEFAULT_SUPPLIER = '拓人';
 
-// カタクチの冷凍庫の在庫がなくなり、この日以降の配達分の牡蠣は拓人指ヶ浜から直接出荷している。
-// この日以降の店舗配達分で仕入れ先が未記録のものは、拓人ではなく拓人指ヶ浜から出たものとして扱い、
-// 冷凍庫の在庫からは引かない(冷凍庫から出した分は「配達の仕入れ先」で拓人・カタクチなどを記録する)。
-// 冷凍庫からの配達に戻すときは、この日付を変える(または遠い将来の日付にする)。
+// この日以降の牡蠣の発注(店舗・卸先すべて)は、受注ごと・サイズごとに「生」「冷凍(拓人ストック)」
+// 「冷凍(カタクチで冷凍)」をカタクチ側で振り分ける(oyster_allocationsテーブル、?stock=1&view=alloc)。
+// 振り分けていない分は生(拓人指ヶ浜からの直送)として扱い、冷凍庫の在庫からは引かない。
+// 冷凍はどちらもカタクチの冷凍庫に入庫してから配送するので、入庫の仕入れ先「拓人」「カタクチ」の残りから引く。
+// この日より前の配達は、これまで通り「配達の仕入れ先」の記録(未記録は拓人)で計算する。
 const DIRECT_SHIP_FROM_DATE = '2026-11-13';
+const FROZEN_SOURCES = [
+  { key: 'takuto', supplier: '拓人', label: '冷凍(拓人ストック)', short: '冷凍 拓人' },
+  { key: 'katakuchi', supplier: 'カタクチ', label: '冷凍(カタクチで冷凍)', short: '冷凍 カタクチ' },
+];
+// 発注1行と振り分け1行から、冷凍の内訳を求める(発注が後から減っても発注数を超えないように切り詰める)。
+function frozenSplitOf(orderRow, alloc) {
+  const out = {};
+  ['s', 'm'].forEach((size) => {
+    let left = Number(orderRow[`${size}_boxes`]) || 0;
+    FROZEN_SOURCES.forEach((src) => {
+      const want = alloc ? Number(alloc[`${src.key}_${size}`]) || 0 : 0;
+      const v = Math.max(0, Math.min(want, left));
+      if (!out[src.supplier]) out[src.supplier] = { mixed: 0, s: 0, m: 0 };
+      out[src.supplier][size] = v;
+      left -= v;
+    });
+  });
+  return out;
+}
 const DIRECT_SHIP_SUPPLIER = '拓人指ヶ浜';
 function defaultStoreSupplierFor(date) {
   return date >= DIRECT_SHIP_FROM_DATE ? DIRECT_SHIP_SUPPLIER : STOCK_OUT_DEFAULT_SUPPLIER;
@@ -2554,6 +2574,7 @@ async function renderStockPage() {
   if (view === 'out') return renderStockOutPage();
   if (view === 'storeout') return renderStoreOutPage();
   if (view === 'day') return renderStockDayPage();
+  if (view === 'alloc') return renderOysterAllocPage();
   return renderStockMenuPage();
 }
 
@@ -2565,6 +2586,7 @@ function stockSubNavHtml(current) {
   const ref = stockRefSuffix();
   const items = [
     { key: 'balance', label: '📊 在庫確認' },
+    { key: 'alloc', label: '❄️ 冷凍・生の振り分け' },
     { key: 'in', label: '📥 入庫を記録' },
     { key: 'out', label: '📤 自社使用を記録' },
     { key: 'storeout', label: '🚚 出庫元を修正' },
@@ -2623,6 +2645,7 @@ function renderStockMenuPage() {
       <div class="card">
         <ul class="home-links">
           <li><a href="?stock=1&view=balance${ref}">📊 在庫を確認する</a></li>
+          <li><a href="?stock=1&view=alloc${ref}">❄️ 受注を冷凍・生に振り分ける</a></li>
           <li><a href="?stock=1&view=in${ref}">📥 入庫を記録する</a></li>
           <li><a href="?stock=1&view=out${ref}">📤 出庫(自社使用)を記録する</a></li>
           <li><a href="?stock=1&view=storeout${ref}">🚚 出庫元を修正する(拓人以外から出した場合)</a></li>
@@ -2631,16 +2654,218 @@ function renderStockMenuPage() {
     </div>`;
 }
 
+// ?stock=1&view=alloc&date=YYYY-MM-DD → その日の牡蠣の受注(店舗・卸先すべて)を、サイズごとに
+// 「冷凍(拓人ストック)」「冷凍(カタクチで冷凍)」に振り分ける。振り分けていない分は生。
+async function renderOysterAllocPage() {
+  const params = new URLSearchParams(location.search);
+  const dateStr = params.get('date') || todayStr();
+  const ref = stockRefSuffix();
+  const navLink = (d, label) => `<a class="view-toggle-btn" href="?stock=1&view=alloc&date=${d}${ref}">${label}</a>`;
+  app.innerHTML = `
+    <div class="page wide">
+      <h1>牡蠣在庫管理</h1>
+      ${adminBackLinkHtml()}
+      ${stockSubNavHtml('alloc')}
+      <p class="hint">牡蠣の受注を、サイズごとに冷凍(拓人ストック)・冷凍(カタクチで冷凍)へ振り分けます。振り分けていない分は生(拓人指ヶ浜から直送)として扱い、冷凍庫の在庫からは引きません。冷凍に振り分けた分は、配達日にカタクチの冷凍庫の在庫(選んだ仕入れ先の残り)から引かれます。</p>
+      <div class="card">
+        <div class="field">
+          <label for="allocDate">配達日(宅配は着希望日)</label>
+          <input type="date" id="allocDate" value="${dateStr}">
+        </div>
+        <div class="view-toggle">${navLink(addDaysStr(dateStr, -1), '← 前の日')}${navLink(
+          todayStr(),
+          '今日'
+        )}${navLink(addDaysStr(dateStr, 1), '次の日 →')}</div>
+      </div>
+      <div id="allocBody"><p class="hint">読み込み中…</p></div>
+    </div>`;
+  document.getElementById('allocDate').addEventListener('change', (e) => {
+    if (e.target.value) location.href = `?stock=1&view=alloc&date=${e.target.value}${ref}`;
+  });
+  const body = document.getElementById('allocBody');
+  if (dateStr < DIRECT_SHIP_FROM_DATE) {
+    body.innerHTML = `<div class="card"><p class="hint">${formatDateJp(
+      DIRECT_SHIP_FROM_DATE
+    )}より前の配達は、これまで通り「出庫元を修正」の記録で計算しています(振り分けは${formatDateJp(
+      DIRECT_SHIP_FROM_DATE
+    )}以降の受注から)。</p></div>`;
+    return;
+  }
+  let orders, allocs, stock;
+  try {
+    [orders, allocs, stock] = await Promise.all([
+      fetchOysterOrdersRange(dateStr, dateStr),
+      fetchOysterAllocationsRange(dateStr, dateStr),
+      computeKakiStockBalance('2099-12-31'),
+    ]);
+  } catch (e) {
+    console.error(e);
+    body.innerHTML = '<p class="msg-error">読み込みに失敗しました。</p>';
+    return;
+  }
+  const storeOrder = (slug) => {
+    const i = STORES.findIndex((st) => st.slug === slug);
+    return i < 0 ? 9999 : i;
+  };
+  const rows = orders
+    .filter((r) => (Number(r.s_boxes) || 0) > 0 || (Number(r.m_boxes) || 0) > 0)
+    .sort((a, b) => storeOrder(a.store_slug) - storeOrder(b.store_slug));
+  const allocMap = {};
+  allocs.forEach((a) => (allocMap[a.store_slug] = a));
+  // 冷凍の残り(まだ発送していない受注の振り分けも含めて引いた後)。この画面の入力を変えた分を足し引きして見せる。
+  const { supplierBalance } = computeSupplierUsage(stock);
+  const savedFrozen = {};
+  FROZEN_SOURCES.forEach((src) => (savedFrozen[src.supplier] = { s: 0, m: 0 }));
+  rows.forEach((r) => {
+    const split = frozenSplitOf(r, allocMap[r.store_slug]);
+    FROZEN_SOURCES.forEach((src) => {
+      savedFrozen[src.supplier].s += split[src.supplier].s;
+      savedFrozen[src.supplier].m += split[src.supplier].m;
+    });
+  });
+
+  if (rows.length === 0) {
+    body.innerHTML = `<div class="card"><p class="hint">${formatDateJp(dateStr)}の牡蠣の受注はありません。</p></div>`;
+    return;
+  }
+  const sizeCell = (r, size) => {
+    const qty = Number(r[`${size}_boxes`]) || 0;
+    if (!qty) return '<td class="hint">—</td>';
+    const split = frozenSplitOf(r, allocMap[r.store_slug]);
+    const inputs = FROZEN_SOURCES.map(
+      (src) => `<label class="alloc-in">${escapeHtml(src.short)}
+        <input type="number" min="0" max="${qty}" step="1" inputmode="numeric" data-slug="${escapeHtml(
+          r.store_slug
+        )}" data-size="${size}" data-src="${src.key}" value="${split[src.supplier][size] || ''}" placeholder="0"></label>`
+    ).join('');
+    return `<td><div class="alloc-qty">${size.toUpperCase()} ${formatCaseQty(qty)}ケース</div>${inputs}
+      <div class="alloc-raw" data-slug="${escapeHtml(r.store_slug)}" data-size="${size}"></div></td>`;
+  };
+  body.innerHTML = `
+    <div class="card">
+      <h2>${formatDateJp(dateStr)}の内訳</h2>
+      <div id="allocSummary"></div>
+    </div>
+    <div class="card">
+      <h2>受注ごとの振り分け</h2>
+      <div class="cal-list-wrap">
+        <table class="cal-list-table alloc-table">
+          <thead><tr><th>店舗・卸先</th><th>Sサイズ</th><th>Mサイズ</th></tr></thead>
+          <tbody>${rows
+            .map((r) => {
+              const st = findStore(r.store_slug);
+              const name = (st && st.name) || r.store_name || r.store_slug;
+              const tag = st && st.customer ? ' <span class="hint">(卸先)</span>' : '';
+              return `<tr><td>${escapeHtml(name)}${tag}</td>${sizeCell(r, 's')}${sizeCell(r, 'm')}</tr>`;
+            })
+            .join('')}</tbody>
+        </table>
+      </div>
+      <button id="allocSaveBtn" class="primary">振り分けを保存</button>
+      <div id="allocMsg"></div>
+    </div>`;
+
+  const readInputs = () => {
+    const bySlug = {};
+    body.querySelectorAll('input[data-slug]').forEach((el) => {
+      const slug = el.dataset.slug;
+      if (!bySlug[slug]) bySlug[slug] = {};
+      bySlug[slug][`${el.dataset.src}_${el.dataset.size}`] = Math.max(0, Math.floor(Number(el.value) || 0));
+    });
+    return bySlug;
+  };
+  const refresh = () => {
+    const bySlug = readInputs();
+    const tot = { raw: { s: 0, m: 0 } };
+    FROZEN_SOURCES.forEach((src) => (tot[src.supplier] = { s: 0, m: 0 }));
+    let over = false;
+    rows.forEach((r) => {
+      const a = bySlug[r.store_slug] || {};
+      ['s', 'm'].forEach((size) => {
+        const qty = Number(r[`${size}_boxes`]) || 0;
+        if (!qty) return;
+        const frozen = FROZEN_SOURCES.reduce((n, src) => n + (a[`${src.key}_${size}`] || 0), 0);
+        FROZEN_SOURCES.forEach((src) => (tot[src.supplier][size] += a[`${src.key}_${size}`] || 0));
+        tot.raw[size] += Math.max(qty - frozen, 0);
+        const el = body.querySelector(`.alloc-raw[data-slug="${CSS.escape(r.store_slug)}"][data-size="${size}"]`);
+        if (frozen > qty) {
+          over = true;
+          el.innerHTML = `<span class="msg-error">冷凍が受注(${qty})より多いです</span>`;
+        } else {
+          el.textContent = `生 ${qty - frozen}`;
+        }
+      });
+    });
+    const line = (label, q) =>
+      `<li><span class="recent-store">${escapeHtml(label)}</span><span class="oyster-qty">S ${formatCaseQty(
+        q.s
+      )} / M ${formatCaseQty(q.m)}</span></li>`;
+    const remain = FROZEN_SOURCES.map((src) => {
+      const b = supplierBalance[src.supplier];
+      const q = {
+        s: b.s + savedFrozen[src.supplier].s - tot[src.supplier].s,
+        m: b.m + savedFrozen[src.supplier].m - tot[src.supplier].m,
+      };
+      const short = q.s < 0 || q.m < 0;
+      return `<li><span class="recent-store">${escapeHtml(src.label)}の残り</span><span class="oyster-qty${
+        short ? ' alloc-short' : ''
+      }">S ${formatCaseQty(q.s)} / M ${formatCaseQty(q.m)}${short ? ' (足りません)' : ''}</span></li>`;
+    }).join('');
+    document.getElementById('allocSummary').innerHTML = `
+      <ul class="recent-list">${line('生', tot.raw)}${FROZEN_SOURCES.map((src) => line(src.label, tot[src.supplier])).join(
+        ''
+      )}</ul>
+      <p class="hint">冷凍の残り(この日より後の振り分け済みの分も引いた後):</p>
+      <ul class="recent-list">${remain}</ul>`;
+    document.getElementById('allocSaveBtn').disabled = over;
+  };
+  body.querySelectorAll('input[data-slug]').forEach((el) => el.addEventListener('input', refresh));
+  refresh();
+
+  document.getElementById('allocSaveBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('allocSaveBtn');
+    const msg = document.getElementById('allocMsg');
+    btn.disabled = true;
+    const bySlug = readInputs();
+    try {
+      for (const r of rows) {
+        const a = bySlug[r.store_slug] || {};
+        const saved = allocMap[r.store_slug] || {};
+        const next = {
+          takutoS: a.takuto_s || 0,
+          takutoM: a.takuto_m || 0,
+          katakuchiS: a.katakuchi_s || 0,
+          katakuchiM: a.katakuchi_m || 0,
+        };
+        const same =
+          next.takutoS === (Number(saved.takuto_s) || 0) &&
+          next.takutoM === (Number(saved.takuto_m) || 0) &&
+          next.katakuchiS === (Number(saved.katakuchi_s) || 0) &&
+          next.katakuchiM === (Number(saved.katakuchi_m) || 0);
+        if (same) continue;
+        await saveOysterAllocation({ storeSlug: r.store_slug, orderDate: dateStr, ...next });
+      }
+      msg.innerHTML = '<p class="msg-success">保存しました。</p>';
+      setTimeout(() => renderOysterAllocPage(), 600);
+    } catch (e) {
+      console.error(e);
+      msg.innerHTML = '<p class="msg-error">保存に失敗しました。もう一度お試しください。</p>';
+      btn.disabled = false;
+    }
+  });
+}
+
 // 牡蠣在庫(冷凍庫)の合計残高を計算する。asOfDateまでに確定した入庫・発注(出荷)・自社使用から求める。
 // 在庫確認ページの表示と、発注画面の「Sサイズの受付上限」(asOfDateを遠い将来にして、まだ出荷していない
 // 受注分まで差し引いた残り)の両方で使う。
 async function computeKakiStockBalance(asOfDate) {
   // 宅配受付店舗(着希望日で受け付ける店舗)は着希望日の前日に発送するため、asOfDateの
   // 翌日分の発注も1日多く取得しておく(asOfDate時点ですでに発送済みとして計上するため)。
-  const [allStockInRows, shippedRows, internalOutRows] = await Promise.all([
+  const [allStockInRows, shippedRows, internalOutRows, allocRows] = await Promise.all([
     fetchStockInAll(),
     fetchOysterOrdersRange(KAKI_STOCK_TRACKING_START_DATE, addDaysStr(asOfDate, 1)),
     fetchStockOutInternalAll(),
+    fetchOysterAllocationsRange(DIRECT_SHIP_FROM_DATE, addDaysStr(asOfDate, 1)),
   ]);
   const stockInRowsUpToDate = allStockInRows.filter((r) => r.in_date <= asOfDate);
   const internalOutRowsUpToDate = internalOutRows.filter(
@@ -2678,24 +2903,32 @@ async function computeKakiStockBalance(asOfDate) {
       outOnlyStoreByDate[key].m += Number(r.m_boxes) || 0;
     });
   // shippedByDate: 全体在庫の計算に使う「この冷凍庫から実際に出た分」。
-  // 直送(DIRECT_SHIP_FROM_DATE以降)の日は、冷凍庫の仕入れ先(拓人・カタクチなど)を記録した分だけが
-  // 冷凍庫から出たものとし、それ以外(未記録・指ヶ浜)はすべて冷凍庫の外から出たものとして扱う。
-  const managedStoreByDate = {};
-  internalOutRowsUpToDate
-    .filter((r) => r.purpose === 'store' && STOCK_SUPPLIERS.includes(r.supplier))
-    .forEach((r) => {
-      const key = r.out_date;
-      if (!managedStoreByDate[key]) managedStoreByDate[key] = { mixed: 0, s: 0, m: 0 };
-      managedStoreByDate[key].mixed += Number(r.mixed_boxes) || 0;
-      managedStoreByDate[key].s += Number(r.s_boxes) || 0;
-      managedStoreByDate[key].m += Number(r.m_boxes) || 0;
+  // DIRECT_SHIP_FROM_DATE以降の配達は、受注ごとの振り分けで「冷凍」にした分だけが冷凍庫から出たもの。
+  // frozenByDate[発送日][仕入れ先] = {mixed, s, m}
+  const allocMap = {};
+  allocRows.forEach((a) => (allocMap[`${a.store_slug}|${a.order_date}`] = a));
+  const frozenByDate = {};
+  shippedRows.forEach((r) => {
+    const key = oysterShipDate(r);
+    if (key > asOfDate || key < DIRECT_SHIP_FROM_DATE) return;
+    const split = frozenSplitOf(r, allocMap[`${r.store_slug}|${r.order_date}`]);
+    if (!frozenByDate[key]) frozenByDate[key] = {};
+    Object.keys(split).forEach((sup) => {
+      if (!frozenByDate[key][sup]) frozenByDate[key][sup] = { mixed: 0, s: 0, m: 0 };
+      frozenByDate[key][sup].s += split[sup].s;
+      frozenByDate[key][sup].m += split[sup].m;
     });
+  });
   const shippedByDate = {};
   Object.keys(shippedByDateRaw).forEach((key) => {
     const raw = shippedByDateRaw[key];
     let outOnly = outOnlyStoreByDate[key] || { mixed: 0, s: 0, m: 0 };
     if (key >= DIRECT_SHIP_FROM_DATE) {
-      const managed = managedStoreByDate[key] || { mixed: 0, s: 0, m: 0 };
+      const managed = { mixed: 0, s: 0, m: 0 };
+      Object.values(frozenByDate[key] || {}).forEach((q) => {
+        managed.s += q.s;
+        managed.m += q.m;
+      });
       outOnly = {
         mixed: Math.max(raw.mixed - managed.mixed, 0),
         s: Math.max(raw.s - managed.s, 0),
@@ -2731,7 +2964,95 @@ async function computeKakiStockBalance(asOfDate) {
     s: inTotal.s - outTotal.s,
     m: inTotal.m - outTotal.m,
   };
-  return { stockInRowsUpToDate, internalOutRowsUpToDate, shippedByDateRaw, shippedByDate, inTotal, outTotal, balance };
+  return { stockInRowsUpToDate, internalOutRowsUpToDate, shippedByDateRaw, shippedByDate, frozenByDate, inTotal, outTotal, balance };
+}
+
+// 仕入れ先ごとの残りと、配達分の仕入れ先別の内訳(日ごと)を求める。
+// deliveryBySupplierByDate[日付][仕入れ先] = 冷凍庫から配達に出た分(在庫管理する仕入れ先のみ。残りは生)。
+function computeSupplierUsage({ stockInRowsUpToDate, internalOutRowsUpToDate, shippedByDateRaw, frozenByDate }) {
+  const zero = () => ({ mixed: 0, s: 0, m: 0 });
+  const supplierBalance = {};
+  STOCK_SUPPLIERS.forEach((s) => (supplierBalance[s] = zero()));
+  stockInRowsUpToDate.forEach((r) => {
+    if (supplierBalance[r.note]) {
+      supplierBalance[r.note].mixed += Number(r.mixed_boxes) || 0;
+      supplierBalance[r.note].s += Number(r.s_boxes) || 0;
+      supplierBalance[r.note].m += Number(r.m_boxes) || 0;
+    }
+  });
+  // 自社使用の出庫は、記録された仕入れ先からそのまま全額差し引く。
+  internalOutRowsUpToDate
+    .filter((r) => r.purpose !== 'store')
+    .forEach((r) => {
+      if (supplierBalance[r.supplier]) {
+        supplierBalance[r.supplier].mixed -= Number(r.mixed_boxes) || 0;
+        supplierBalance[r.supplier].s -= Number(r.s_boxes) || 0;
+        supplierBalance[r.supplier].m -= Number(r.m_boxes) || 0;
+      }
+    });
+  const deliveryBySupplierByDate = {};
+  const addDelivery = (d, sup, q) => {
+    if (!supplierBalance[sup]) return;
+    supplierBalance[sup].mixed -= q.mixed;
+    supplierBalance[sup].s -= q.s;
+    supplierBalance[sup].m -= q.m;
+    if (!deliveryBySupplierByDate[d]) deliveryBySupplierByDate[d] = {};
+    if (!deliveryBySupplierByDate[d][sup]) deliveryBySupplierByDate[d][sup] = zero();
+    deliveryBySupplierByDate[d][sup].mixed += q.mixed;
+    deliveryBySupplierByDate[d][sup].s += q.s;
+    deliveryBySupplierByDate[d][sup].m += q.m;
+  };
+
+  // DIRECT_SHIP_FROM_DATEより前の店舗配達分は、「配達の仕入れ先」の記録を発注合計に収まるよう
+  // 按分して差し引き(消し忘れの過大記録があっても合計がズレないように)、未記録分は拓人から引く。
+  const storeOutRowsByDate = {};
+  internalOutRowsUpToDate
+    .filter((r) => r.purpose === 'store' && r.out_date < DIRECT_SHIP_FROM_DATE)
+    .forEach((r) => {
+      if (!storeOutRowsByDate[r.out_date]) storeOutRowsByDate[r.out_date] = [];
+      storeOutRowsByDate[r.out_date].push(r);
+    });
+  const attributedStoreByDate = {};
+  const capRatio = (attributed, shipped) => (attributed > 0 ? Math.min(1, shipped / attributed) : 1);
+  Object.keys(storeOutRowsByDate).forEach((d) => {
+    const recs = storeOutRowsByDate[d];
+    const attributed = zero();
+    recs.forEach((r) => {
+      attributed.mixed += Number(r.mixed_boxes) || 0;
+      attributed.s += Number(r.s_boxes) || 0;
+      attributed.m += Number(r.m_boxes) || 0;
+    });
+    attributedStoreByDate[d] = attributed;
+    const shipped = shippedByDateRaw[d] || zero();
+    const ratio = {
+      mixed: capRatio(attributed.mixed, shipped.mixed),
+      s: capRatio(attributed.s, shipped.s),
+      m: capRatio(attributed.m, shipped.m),
+    };
+    recs.forEach((r) =>
+      addDelivery(d, r.supplier, {
+        mixed: (Number(r.mixed_boxes) || 0) * ratio.mixed,
+        s: (Number(r.s_boxes) || 0) * ratio.s,
+        m: (Number(r.m_boxes) || 0) * ratio.m,
+      })
+    );
+  });
+  Object.keys(shippedByDateRaw).forEach((d) => {
+    if (d >= DIRECT_SHIP_FROM_DATE) return;
+    const shipped = shippedByDateRaw[d];
+    const attributed = attributedStoreByDate[d] || zero();
+    addDelivery(d, STOCK_OUT_DEFAULT_SUPPLIER, {
+      mixed: Math.max(shipped.mixed - attributed.mixed, 0),
+      s: Math.max(shipped.s - attributed.s, 0),
+      m: Math.max(shipped.m - attributed.m, 0),
+    });
+  });
+
+  // DIRECT_SHIP_FROM_DATE以降は、受注ごとの振り分けで冷凍にした分だけを差し引く。
+  Object.keys(frozenByDate || {}).forEach((d) => {
+    Object.keys(frozenByDate[d]).forEach((sup) => addDelivery(d, sup, frozenByDate[d][sup]));
+  });
+  return { supplierBalance, attributedStoreByDate, deliveryBySupplierByDate };
 }
 
 async function renderStockBalancePage() {
@@ -3305,93 +3626,13 @@ async function renderStockBalancePage() {
     const asOfDate = document.getElementById('asOfDate').value || todayStr();
     balanceEl.innerHTML = '<p class="hint">読み込み中…</p>';
     try {
-      const { stockInRowsUpToDate, internalOutRowsUpToDate, shippedByDateRaw, shippedByDate, balance } =
-        await computeKakiStockBalance(asOfDate);
+      const stockResult = await computeKakiStockBalance(asOfDate);
+      const { internalOutRowsUpToDate, shippedByDateRaw, shippedByDate, balance } = stockResult;
       const totalCases = balance.mixed + balance.s + balance.m;
       const forecastMsg = buildStockoutForecast(balance, shippedByDate, asOfDate);
       const balanceHeading = asOfDate === todayStr() ? '現在庫(残り)' : `在庫(${formatDateJp(asOfDate)}時点)`;
 
-      // 仕入れ先ごとの残り = その仕入れ先の入庫合計 − その仕入れ先を指定して記録した出庫合計
-      // (用途が自社使用・店舗配達どちらでも、仕入れ先が分かっているものはすべて差し引く)
-      const supplierBalance = {};
-      STOCK_SUPPLIERS.forEach((s) => {
-        supplierBalance[s] = { mixed: 0, s: 0, m: 0 };
-      });
-      stockInRowsUpToDate.forEach((r) => {
-        if (supplierBalance[r.note]) {
-          supplierBalance[r.note].mixed += Number(r.mixed_boxes) || 0;
-          supplierBalance[r.note].s += Number(r.s_boxes) || 0;
-          supplierBalance[r.note].m += Number(r.m_boxes) || 0;
-        }
-      });
-
-      // 自社使用の出庫は、記録された仕入れ先からそのまま全額差し引く
-      // (発注データのような突き合わせ先がなく、この記録自体が正解のため)。
-      internalOutRowsUpToDate
-        .filter((r) => r.purpose !== 'store')
-        .forEach((r) => {
-          if (supplierBalance[r.supplier]) {
-            supplierBalance[r.supplier].mixed -= Number(r.mixed_boxes) || 0;
-            supplierBalance[r.supplier].s -= Number(r.s_boxes) || 0;
-            supplierBalance[r.supplier].m -= Number(r.m_boxes) || 0;
-          }
-        });
-
-      // 店舗配達分(purpose='store')は発注データ(shippedByDateRaw、上ですでに計算済み)を
-      // 「正」として扱う。発注が後から編集・キャンセルされて、先に登録した「配達の仕入れ先」の
-      // 内訳の方が多いまま残ってしまった日(過大記録)は、その日の内訳をその日の実発注合計に
-      // 収まるよう按分して差し引く。これにより、内訳の消し忘れが残っていても、仕入れ先ごとの
-      // 残りの合計が現在庫の合計から永久にズレることがなくなる。
-      const storeOutRowsByDate = {};
-      internalOutRowsUpToDate
-        .filter((r) => r.purpose === 'store')
-        .forEach((r) => {
-          const key = r.out_date;
-          if (!storeOutRowsByDate[key]) storeOutRowsByDate[key] = [];
-          storeOutRowsByDate[key].push(r);
-        });
-      const attributedStoreByDate = {};
-      const capRatio = (attributed, shipped) => (attributed > 0 ? Math.min(1, shipped / attributed) : 1);
-      Object.keys(storeOutRowsByDate).forEach((d) => {
-        const recs = storeOutRowsByDate[d];
-        const attributed = { mixed: 0, s: 0, m: 0 };
-        recs.forEach((r) => {
-          attributed.mixed += Number(r.mixed_boxes) || 0;
-          attributed.s += Number(r.s_boxes) || 0;
-          attributed.m += Number(r.m_boxes) || 0;
-        });
-        attributedStoreByDate[d] = attributed;
-        const shipped = shippedByDateRaw[d] || { mixed: 0, s: 0, m: 0 };
-        const ratio = {
-          mixed: capRatio(attributed.mixed, shipped.mixed),
-          s: capRatio(attributed.s, shipped.s),
-          m: capRatio(attributed.m, shipped.m),
-        };
-        recs.forEach((r) => {
-          if (!supplierBalance[r.supplier]) return;
-          supplierBalance[r.supplier].mixed -= (Number(r.mixed_boxes) || 0) * ratio.mixed;
-          supplierBalance[r.supplier].s -= (Number(r.s_boxes) || 0) * ratio.s;
-          supplierBalance[r.supplier].m -= (Number(r.m_boxes) || 0) * ratio.m;
-        });
-      });
-
-      // 店舗配達分のうち、仕入れ先が未記録の日は「標準で拓人」として拓人の残りから
-      // 自動的に差し引く(牡蠣の仕入れはほぼ拓人のため)。他の仕入れ先(勝又商店・カタクチ)から
-      // 出た分は、これまで通り出庫記録で明示的に記録すれば正しくそちらから引かれる。
-      Object.keys(shippedByDateRaw).forEach((d) => {
-        // 直送の日の未記録分は拓人指ヶ浜から出たもの(在庫管理の対象外)なので、どこからも引かない。
-        if (defaultStoreSupplierFor(d) !== STOCK_OUT_DEFAULT_SUPPLIER) return;
-        const shipped = shippedByDateRaw[d];
-        const attributed = attributedStoreByDate[d] || { mixed: 0, s: 0, m: 0 };
-        const unrecorded = {
-          mixed: Math.max(shipped.mixed - attributed.mixed, 0),
-          s: Math.max(shipped.s - attributed.s, 0),
-          m: Math.max(shipped.m - attributed.m, 0),
-        };
-        supplierBalance[STOCK_OUT_DEFAULT_SUPPLIER].mixed -= unrecorded.mixed;
-        supplierBalance[STOCK_OUT_DEFAULT_SUPPLIER].s -= unrecorded.s;
-        supplierBalance[STOCK_OUT_DEFAULT_SUPPLIER].m -= unrecorded.m;
-      });
+      const { supplierBalance, attributedStoreByDate, deliveryBySupplierByDate } = computeSupplierUsage(stockResult);
 
       // 発注が後から編集・キャンセルされて、先に登録した「配達の仕入れ先」の記録の方が
       // 多く残ってしまっている(消し忘れの可能性がある)日を検出し、一覧で気づけるようにする。
@@ -3422,6 +3663,71 @@ async function renderStockBalancePage() {
               .join('')}</ul>
           </div>`
         : '';
+
+      // 月ごとの配達の内訳: 冷凍庫から出た分(仕入れ先別)と、それ以外(生=拓人指ヶ浜などからの直送)。
+      const monthly = {};
+      const monthOf = (d) => d.slice(0, 7);
+      const ensureMonth = (k) => {
+        if (!monthly[k]) {
+          monthly[k] = { total: { mixed: 0, s: 0, m: 0 }, frozen: {} };
+          STOCK_SUPPLIERS.forEach((sup) => (monthly[k].frozen[sup] = { mixed: 0, s: 0, m: 0 }));
+        }
+        return monthly[k];
+      };
+      Object.keys(shippedByDateRaw).forEach((d) => {
+        const mo = ensureMonth(monthOf(d));
+        ['mixed', 's', 'm'].forEach((k) => (mo.total[k] += shippedByDateRaw[d][k]));
+      });
+      Object.keys(deliveryBySupplierByDate).forEach((d) => {
+        const mo = ensureMonth(monthOf(d));
+        Object.keys(deliveryBySupplierByDate[d]).forEach((sup) => {
+          if (!mo.frozen[sup]) return;
+          ['mixed', 's', 'm'].forEach((k) => (mo.frozen[sup][k] += deliveryBySupplierByDate[d][sup][k]));
+        });
+      });
+      const usedSuppliers = STOCK_SUPPLIERS.filter((sup) =>
+        Object.values(monthly).some((mo) => mo.frozen[sup].mixed || mo.frozen[sup].s || mo.frozen[sup].m)
+      );
+      const supplierLabel = (sup) => {
+        const src = FROZEN_SOURCES.find((x) => x.supplier === sup);
+        return src ? src.label : `冷凍(${sup})`;
+      };
+      const monthRows = Object.keys(monthly)
+        .sort()
+        .map((k) => {
+          const mo = monthly[k];
+          const frozenSum = { mixed: 0, s: 0, m: 0 };
+          usedSuppliers.forEach((sup) => ['mixed', 's', 'm'].forEach((x) => (frozenSum[x] += mo.frozen[sup][x])));
+          const raw = {
+            mixed: Math.max(mo.total.mixed - frozenSum.mixed, 0),
+            s: Math.max(mo.total.s - frozenSum.s, 0),
+            m: Math.max(mo.total.m - frozenSum.m, 0),
+          };
+          const [y, mm] = k.split('-');
+          return `<tr><td class="cal-list-date">${y}年${Number(mm)}月</td><td>${stockCompactQty(
+            mo.total.mixed,
+            mo.total.s,
+            mo.total.m
+          )}</td><td>${stockCompactQty(raw.mixed, raw.s, raw.m)}</td>${usedSuppliers
+            .map((sup) => `<td>${stockCompactQty(mo.frozen[sup].mixed, mo.frozen[sup].s, mo.frozen[sup].m)}</td>`)
+            .join('')}</tr>`;
+        })
+        .join('');
+      const monthlyFrozenHtml = `
+        <div class="card">
+          <h2>配達の生・冷凍の内訳(月ごと、${formatDateJp(asOfDate)}まで)</h2>
+          <p class="hint">店舗・卸先への配達(牡蠣の受注)を、生(拓人指ヶ浜などからの直送)とカタクチの冷凍庫から出した冷凍に分けた数です(単位: ケース)。${formatDateJp(
+            DIRECT_SHIP_FROM_DATE
+          )}以降は「<a href="?stock=1&view=alloc${stockRefSuffix()}">冷凍・生の振り分け</a>」の内容、それより前は出庫元の記録(未記録は拓人の冷凍)から計算しています。自社使用の分は含みません。</p>
+          <div class="cal-list-wrap">
+            <table class="cal-list-table">
+              <thead><tr><th>月</th><th>配達合計</th><th>生</th>${usedSuppliers
+                .map((sup) => `<th>${escapeHtml(supplierLabel(sup))}</th>`)
+                .join('')}</tr></thead>
+              <tbody>${monthRows}</tbody>
+            </table>
+          </div>
+        </div>`;
 
       const supplierRows = STOCK_SUPPLIERS.map((s) => {
         const b = supplierBalance[s];
@@ -3499,9 +3805,10 @@ async function renderStockBalancePage() {
         </div>
         <div class="card">
           <h2>仕入れ先ごとの残り(${formatDateJp(asOfDate)}時点)</h2>
-          <p class="hint">出庫記録で仕入れ先を指定した分に加えて、店舗配達分のうち仕入れ先が未記録の日は、${formatDateJp(DIRECT_SHIP_FROM_DATE)}より前は拓人、それ以降は拓人指ヶ浜からの直送(冷凍庫からは引かない)として計算しています。冷凍庫から出した分があれば、出庫記録で拓人・カタクチなどを記録してください。</p>
+          <p class="hint">${formatDateJp(DIRECT_SHIP_FROM_DATE)}以降の配達は、「冷凍・生の振り分け」で冷凍にした分だけを、選んだ仕入れ先から引いています(振り分けていない分は生として、冷凍庫からは引きません)。それより前の配達は、出庫記録で仕入れ先を指定した分に加えて、未記録の日は拓人として計算しています。</p>
           <ul class="recent-list">${supplierRows}</ul>
         </div>
+        ${monthlyFrozenHtml}
         ${overRecordedHtml}`;
 
       // 「仕入れ先別の出庫内訳」はページ最後(カレンダー/一覧表示カードの下)に表示する。

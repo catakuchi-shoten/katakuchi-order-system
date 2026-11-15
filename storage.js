@@ -369,6 +369,43 @@ async function deleteStockIn(id) {
   if (!data || data.length === 0) throw new Error('削除できませんでした(権限設定が反映されていない可能性があります)');
 }
 
+// ---- 牡蠣の冷凍・生の振り分け(受注ごと・サイズごと) ----
+
+async function fetchOysterAllocationsRange(from, to) {
+  assertClient();
+  const { data, error } = await sb
+    .from('oyster_allocations')
+    .select('*')
+    .gte('order_date', from)
+    .lte('order_date', to);
+  if (error) throw error;
+  return data || [];
+}
+
+// 冷凍の振り分けがすべて0なら行を消す(=すべて生)。
+async function saveOysterAllocation({ storeSlug, orderDate, takutoS, takutoM, katakuchiS, katakuchiM }) {
+  assertClient();
+  const vals = [takutoS, takutoM, katakuchiS, katakuchiM].map((v) => Number(v) || 0);
+  if (vals.every((v) => v === 0)) {
+    const { error } = await sb.from('oyster_allocations').delete().eq('store_slug', storeSlug).eq('order_date', orderDate);
+    if (error) throw error;
+    return;
+  }
+  const { error } = await sb.from('oyster_allocations').upsert(
+    {
+      store_slug: storeSlug,
+      order_date: orderDate,
+      takuto_s: vals[0],
+      takuto_m: vals[1],
+      katakuchi_s: vals[2],
+      katakuchi_m: vals[3],
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'store_slug,order_date' }
+  );
+  if (error) throw error;
+}
+
 // ---- 牡蠣在庫(自社使用による出庫) ----
 
 async function fetchStockOutInternalAll() {
