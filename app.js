@@ -2223,8 +2223,18 @@ function setupStockExcelSheet(wb, sheetName, firstColLabel) {
   setCell(1, 4, 'うち宅配発送', { font: headerFont, fill: headerFill });
   ws.mergeCells(1, 4, 2, 4);
 
-  // 入庫: F-(仕入れ先ごとに混合/S/M)
-  const inColStart = 6; // F
+  // 配達の生・冷凍: F-I(生S/生M/冷凍S/冷凍M)。店舗・卸先への配達(牡蠣の受注)を、生(拓人指ヶ浜などからの
+  // 直送)とカタクチの冷凍庫から出した冷凍に分けた数。冷凍は「冷凍・生の振り分け」(11/13以降)と
+  // 出庫元の記録(それより前、未記録は拓人の冷凍)から求める(在庫確認ページの月ごとの内訳と同じ計算)。
+  const rawFrozenColStart = 6; // F
+  setCell(1, rawFrozenColStart, '配達の生・冷凍', { font: headerFont, fill: headerFill });
+  ws.mergeCells(1, rawFrozenColStart, 1, rawFrozenColStart + 3);
+  ['生ガキS', '生ガキM', '冷凍ガキS', '冷凍ガキM'].forEach((label, j) =>
+    setCell(2, rawFrozenColStart + j, label, { font: headerFont, fill: headerFill })
+  );
+
+  // 入庫: K-(仕入れ先ごとに混合/S/M)
+  const inColStart = rawFrozenColStart + 4 + 1; // 空列1つ空けて開始(K)
   EXPORT_SUPPLIERS.forEach((supplier, i) => {
     const c0 = inColStart + i * 3;
     setCell(1, c0, `${supplier}入庫`, { font: headerFont, fill: headerFill });
@@ -2266,13 +2276,14 @@ function setupStockExcelSheet(wb, sheetName, firstColLabel) {
   const outEndCol = outGroups[1].start + EXPORT_OUT_SUPPLIERS.length * 3 + 2;
   const inEndCol = inColStart + EXPORT_SUPPLIERS.length * 3 - 1;
   // 空列(宅配発送と入庫の間、入庫と配達出庫の間、配達出庫とイベント出庫の間)。合計行の数式もここは飛ばす。
-  const spacerCols = [5, storeColStart - 1, outGroups[1].start - 1];
+  const spacerCols = [5, inColStart - 1, storeColStart - 1, outGroups[1].start - 1];
 
   return {
     ws,
     setCell,
     EXPORT_SUPPLIERS,
     EXPORT_OUT_SUPPLIERS,
+    rawFrozenColStart,
     inColStart,
     inEndCol,
     storeCols,
@@ -2305,9 +2316,15 @@ function writeStockExcelTotalRow(sheet, row, label, firstDataRow, lastDataRow, {
 }
 
 // 集計済みの1行分(その日/その月の合計)をシートに書き込む。B/C列はSUM数式。
-function writeStockExcelRow(sheet, row, rowLabel, { inBySupplier, storeAttrBySupplier, storeTotal, storeAttrTotal, courierTotal, selfAttrBySupplier, selfUnrecorded }) {
-  const { setCell, EXPORT_SUPPLIERS, EXPORT_OUT_SUPPLIERS, inColStart, inEndCol, storeCols, selfCols, outStartCol, outEndCol, unrecordedFill, ws } = sheet;
+function writeStockExcelRow(sheet, row, rowLabel, { inBySupplier, storeAttrBySupplier, storeTotal, storeAttrTotal, courierTotal, selfAttrBySupplier, selfUnrecorded, rawFrozen }) {
+  const { setCell, EXPORT_SUPPLIERS, EXPORT_OUT_SUPPLIERS, rawFrozenColStart, inColStart, inEndCol, storeCols, selfCols, outStartCol, outEndCol, unrecordedFill, ws } = sheet;
   setCell(row, 1, rowLabel);
+  if (rawFrozen) {
+    [rawFrozen.rawS, rawFrozen.rawM, rawFrozen.frozenS, rawFrozen.frozenM].forEach((v, j) => {
+      const n = Math.round((Number(v) || 0) * 100) / 100;
+      if (n) setCell(row, rawFrozenColStart + j, n);
+    });
+  }
 
   if (courierTotal) setCell(row, 4, courierTotal);
 
@@ -2473,11 +2490,29 @@ function addDaysStr(dateStr, delta) {
 async function buildAndDownloadStockExcel(from, to) {
   // 宅配受付店舗(着希望日で受け付ける店舗)は着希望日の前日に発送するため、toの翌日の
   // 発注も1日分多く取得しておく(toの行の出庫として計上するため)。
-  const [allStockIn, allStockOutInternal, oysterOrdersInRange] = await Promise.all([
+  const [allStockIn, allStockOutInternal, oysterOrdersInRange, stockResult] = await Promise.all([
     fetchStockInAll(),
     fetchStockOutInternalAll(),
     fetchOysterOrdersRange(from, addDaysStr(to, 1)),
+    computeKakiStockBalance(to),
   ]);
+  // 日ごとの配達の生・冷凍(S/M)。冷凍=冷凍庫の仕入れ先から出た分、生=配達合計−冷凍。
+  const { deliveryBySupplierByDate } = computeSupplierUsage(stockResult);
+  const rawFrozenOf = (d) => {
+    const total = stockResult.shippedByDateRaw[d];
+    if (!total) return null;
+    const frozen = { s: 0, m: 0 };
+    Object.values(deliveryBySupplierByDate[d] || {}).forEach((q) => {
+      frozen.s += q.s;
+      frozen.m += q.m;
+    });
+    return {
+      rawS: Math.max(total.s - frozen.s, 0),
+      rawM: Math.max(total.m - frozen.m, 0),
+      frozenS: frozen.s,
+      frozenM: frozen.m,
+    };
+  };
   const stockIn = allStockIn.filter((r) => r.in_date >= from && r.in_date <= to);
   const stockOutInternal = allStockOutInternal.filter((r) => r.out_date >= from && r.out_date <= to);
   const agg = aggregateStockRecords(stockIn, stockOutInternal, oysterOrdersInRange, (d) => d);
@@ -2498,6 +2533,7 @@ async function buildAndDownloadStockExcel(from, to) {
       courierTotal: agg.courierTotalByKey[cur],
       selfAttrBySupplier: agg.selfAttrByKey[cur],
       selfUnrecorded: agg.selfUnrecordedByKey[cur],
+      rawFrozen: rawFrozenOf(cur),
     });
     row += 1;
     cur = addDaysStr(cur, 1);
