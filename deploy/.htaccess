@@ -1,0 +1,10 @@
+# order.catakuchi6.co.jp 用(GitHub Actionsのdeploy-xserver.ymlでアップロードする)。
+# http で開かれたら https に移す。
+RewriteEngine On
+RewriteCond %{HTTPS} !on
+RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+
+# index.html は毎回最新を取りに行く(app.js・storage.js は ?v=... で更新を切り替えている)。
+<Files "index.html">
+  Header set Cache-Control "no-cache"
+</Files>
