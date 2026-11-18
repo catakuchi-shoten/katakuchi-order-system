@@ -8,3 +8,8 @@ RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
 <Files "index.html">
   Header set Cache-Control "no-cache"
 </Files>
+
+# アップロード用の記録ファイルは外から見せない。
+<Files ".ftp-deploy-sync-state.json">
+  Require all denied
+</Files>
