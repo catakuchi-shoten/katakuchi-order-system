@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <script>
   // 旧アドレス(GitHub Pages)で開かれたら、?store=… などを付けたまま新しいアドレスへ移す。
-  if (location.hostname === 'kojiroulab.github.io') {
+  if (location.hostname.endsWith('.github.io')) {
     location.replace('https://order.catakuchi6.co.jp/' + location.search + location.hash);
   }
 </script>
