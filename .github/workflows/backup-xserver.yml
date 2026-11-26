@@ -1,6 +1,6 @@
 # 毎日、Supabase のデータ(受注・取引先など)をまるごと書き出して、Xserver の _backup フォルダに保存する。
 # _backup フォルダには .htaccess で「外からは一切開けない」設定を置き、保存のたびに開けないことを確かめる。
-# 必要な Secrets: SUPABASE_DB_URL(Supabase の Session pooler の接続文字列。パスワード入り)/ FTP_SERVER / FTP_USERNAME / FTP_PASSWORD
+# 必要な Secrets: NEW_SUPABASE_DB_URL(会社の組織の受注システム用プロジェクト katakuchi-order の Session pooler の接続文字列。パスワード入り)/ FTP_SERVER / FTP_USERNAME / FTP_PASSWORD
 # このリポジトリは公開なので、バックアップの中身はログにも Artifacts にも出さない。
 name: Backup to Xserver
 
@@ -32,7 +32,7 @@ jobs:
 
       - name: データを書き出す
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_URL: ${{ secrets.NEW_SUPABASE_DB_URL }}
         run: |
           set -o pipefail
           name="katakuchi-$(TZ=Asia/Tokyo date +%Y-%m-%d).sql.gz"
