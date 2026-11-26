@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: '0 18 * * *'   # 毎日 3:00(日本時間)
   workflow_dispatch:
+    inputs:
+      only_today:
+        description: '今日の分だけ残して、ほかのバックアップを消す(2026-11-27 の切り替え時に一度だけ使用)'
+        type: boolean
+        default: false
 
 concurrency:
   group: backup-xserver
@@ -62,6 +67,8 @@ jobs:
 
           # KEEP_DAYS 日より古いバックアップを消す。
           limit=$(TZ=Asia/Tokyo date -d "-$KEEP_DAYS days" +%Y-%m-%d)
+          # 受注システムだけのプロジェクトへ切り替える前のバックアップには、タスク管理などのデータも入っているので消す。
+          if [ "${{ inputs.only_today }}" = "true" ]; then limit=$(TZ=Asia/Tokyo date +%Y-%m-%d); fi
           curl -sS --ssl-reqd --user "$auth" -l "$ftp/" | tr -d '\r' \
             | grep -E '^katakuchi-[0-9]{4}-[0-9]{2}-[0-9]{2}\.sql\.gz$' \
             | while read -r f; do
