@@ -1,8 +1,8 @@
 // ここに Supabase の Project URL と anon key を貼り付けてください。
 // (Supabase ダッシュボード > Project Settings > API で確認できます。anon key は
 // 公開されても問題ない設計です。アクセス制御はURLを知っている人だけに限定する運用で行っています。)
-const SUPABASE_URL = 'https://krdwyfemepbbyrteyoeb.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_ouoTLzgoCxmyMf7D_kWdzQ_YTEXc2tk';
+const SUPABASE_URL = 'https://girjyniirktwuvwyomgr.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_QbuOkW4pRzuWcOqB0Nm4_g_jr5I2U01';
 
 let sb = null;
 try {
