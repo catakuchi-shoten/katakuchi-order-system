@@ -5,16 +5,17 @@
 #   step=schema … 新しいプロジェクトに、表・権限(RLS)・トリガー・関数を作る(データは写さない)
 #   step=data   … 新しいプロジェクトの受注データを空にしてから、今のプロジェクトのデータを写す(何度でもやり直せる)
 #   step=count  … 両方の件数を並べて表示するだけ
+#   step=cron   … 締切リマインダー(15分ごと)を新しいプロジェクトで動かし、今のプロジェクトの分を止める
 name: Migrate order DB (one-time)
 
 on:
   workflow_dispatch:
     inputs:
       step:
-        description: 'schema / data / count'
+        description: 'schema / data / count / cron'
         required: true
         type: choice
-        options: [count, schema, data]
+        options: [count, schema, data, cron]
 
 concurrency:
   group: migrate-order-db
@@ -45,12 +46,6 @@ jobs:
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
           sudo apt-get install -y -qq postgresql-client-17 >/dev/null
           echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
-
-      - name: 接続文字列の形を確かめる(英数字は x に置き換えて記号の並びだけ表示)
-        run: |
-          for v in OLD NEW; do
-            printf '%s: ' "$v"; printf '%s' "${!v}" | sed -E 's/[A-Za-z0-9]+/x/g'; echo " (長さ ${#OLD} / ${#NEW})"
-          done
 
       - name: 表を作る(schema)
         if: ${{ inputs.step == 'schema' }}
@@ -86,6 +81,26 @@ jobs:
           } | psql "$NEW" -q -v ON_ERROR_STOP=1 >/dev/null
           rm -f "$RUNNER_TEMP/data.sql"
           echo "データを写しました"
+
+      - name: 締切リマインダーを切り替える(cron)
+        if: ${{ inputs.step == 'cron' }}
+        env:
+          CRON_SECRET: ${{ secrets.NEW_CHECK_DEADLINES_SECRET }}
+        run: |
+          set -euo pipefail
+          psql "$NEW" -q -v ON_ERROR_STOP=1 -v secret="$CRON_SECRET" >/dev/null <<'SQL'
+          select cron.unschedule(jobid) from cron.job where jobname = 'check-deadlines-every-15-min';
+          select cron.schedule('check-deadlines-every-15-min', '*/15 * * * *', format($cmd$
+            select net.http_post(
+              url := 'https://girjyniirktwuvwyomgr.supabase.co/functions/v1/check-deadlines',
+              headers := jsonb_build_object('Content-Type', 'application/json', 'x-cron-secret', %L),
+              body := '{}'::jsonb
+            );
+          $cmd$, :'secret'));
+          SQL
+          psql "$OLD" -q -v ON_ERROR_STOP=1 -c "select cron.unschedule(jobid) from cron.job where jobname = 'check-deadlines-every-15-min'" >/dev/null
+          echo "新:"; psql "$NEW" -qAt -c "select jobname, schedule, active from cron.job"
+          echo "今:"; psql "$OLD" -qAt -c "select jobname, schedule, active from cron.job"
 
       - name: 件数を比べる
         run: |
