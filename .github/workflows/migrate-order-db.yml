@@ -28,6 +28,8 @@ env:
     kaki_stock_in kaki_stock_out_internal kaki_stock_audit_log oyster_allocations
     order_audit_log discord_notification_targets notification_targets deadline_reminders_sent
   FUNCTIONS: kaki_stock_audit_trigger order_audit_trigger
+  # LINEへのお知らせは使っていないので、送り先(notification_targets)は表だけ作って中身は写さない。
+  DATA_SKIP: notification_targets
 
 jobs:
   migrate:
@@ -65,7 +67,10 @@ jobs:
         run: |
           set -euo pipefail
           t_args=""; list=""
-          for t in $TABLES; do t_args="$t_args -t public.$t"; list="$list public.$t,"; done
+          for t in $TABLES; do
+            case " $DATA_SKIP " in *" $t "*) continue;; esac
+            t_args="$t_args -t public.$t"; list="$list public.$t,"
+          done
           pg_dump "$OLD" --data-only --no-owner $t_args > "$RUNNER_TEMP/data.sql"
           # トリガー(変更履歴の記録)を動かさずに入れる。先に新しい側を空にするので、何度やり直しても同じ結果になる。
           {
