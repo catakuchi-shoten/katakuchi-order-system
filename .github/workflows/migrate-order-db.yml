@@ -46,6 +46,20 @@ jobs:
           sudo apt-get install -y -qq postgresql-client-17 >/dev/null
           echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
 
+      - name: 接続文字列の形を確かめる(パスワードは長さだけ表示)
+        run: |
+          for v in OLD NEW; do
+            python3 - "$v" "${!v}" <<'PY'
+          import sys, urllib.parse as u
+          name, url = sys.argv[1], sys.argv[2]
+          p = u.urlsplit(url.strip())
+          pw = p.password or ''
+          print(f"{name}: scheme={p.scheme} user={p.username} host={p.hostname} port={p.port} db={p.path} "
+                f"pw_len={len(pw)} pw_has_bracket={'[' in pw or ']' in pw} pw_alnum={pw.isalnum()} "
+                f"spaces={url != url.strip()}")
+          PY
+          done
+
       - name: 表を作る(schema)
         if: ${{ inputs.step == 'schema' }}
         run: |
