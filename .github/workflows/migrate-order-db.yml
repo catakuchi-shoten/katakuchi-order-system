@@ -1,0 +1,88 @@
+# 受注システムのデータだけを、今のSupabaseプロジェクト(タスク管理・在庫管理と同居)から
+# 会社の組織の新しいプロジェクト(katakuchi-order)へ写すための、一度きりの手動ワークフロー。
+# 必要な Secrets: SUPABASE_DB_URL(今のプロジェクト)/ NEW_SUPABASE_DB_URL(新しいプロジェクト)
+# このリポジトリは公開なので、データの中身はログにも Artifacts にも出さない(件数だけ表示する)。
+#   step=schema … 新しいプロジェクトに、表・権限(RLS)・トリガー・関数を作る(データは写さない)
+#   step=data   … 新しいプロジェクトの受注データを空にしてから、今のプロジェクトのデータを写す(何度でもやり直せる)
+#   step=count  … 両方の件数を並べて表示するだけ
+name: Migrate order DB (one-time)
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: 'schema / data / count'
+        required: true
+        type: choice
+        options: [count, schema, data]
+
+concurrency:
+  group: migrate-order-db
+  cancel-in-progress: false
+
+env:
+  # 受注システムが使う表(タスク管理・在庫管理の表は含めない)
+  TABLES: >-
+    oyster_orders pizza_orders whelk_orders
+    wholesale_customers wholesale_orders wholesale_products wholesale_usual_items
+    kaki_stock_in kaki_stock_out_internal kaki_stock_audit_log oyster_allocations
+    order_audit_log discord_notification_targets notification_targets deadline_reminders_sent
+  FUNCTIONS: kaki_stock_audit_trigger order_audit_trigger
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    env:
+      OLD: ${{ secrets.SUPABASE_DB_URL }}
+      NEW: ${{ secrets.NEW_SUPABASE_DB_URL }}
+    steps:
+      - name: PostgreSQL 17 のツールを入れる
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common >/dev/null
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
+          sudo apt-get install -y -qq postgresql-client-17 >/dev/null
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      - name: 表を作る(schema)
+        if: ${{ inputs.step == 'schema' }}
+        run: |
+          set -euo pipefail
+          t_args=""; for t in $TABLES; do t_args="$t_args -t public.$t"; done
+          fn_list=$(printf "'%s'," $FUNCTIONS); fn_list=${fn_list%,}
+          {
+            echo "create extension if not exists pg_cron with schema pg_catalog;"
+            echo "create extension if not exists pg_net;"
+            psql "$OLD" -qAt -c "select pg_get_functiondef(p.oid) || ';' from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname in ($fn_list)"
+            pg_dump "$OLD" --schema-only --no-owner $t_args
+          } > "$RUNNER_TEMP/schema.sql"
+          echo "作成するもの:"; grep -cE '^CREATE (TABLE|POLICY|TRIGGER|INDEX|FUNCTION|OR REPLACE FUNCTION)' "$RUNNER_TEMP/schema.sql" || true
+          psql "$NEW" -q -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/schema.sql" >/dev/null
+          echo "新しいプロジェクトに表を作りました"
+
+      - name: データを写す(data)
+        if: ${{ inputs.step == 'data' }}
+        run: |
+          set -euo pipefail
+          t_args=""; list=""
+          for t in $TABLES; do t_args="$t_args -t public.$t"; list="$list public.$t,"; done
+          pg_dump "$OLD" --data-only --no-owner $t_args > "$RUNNER_TEMP/data.sql"
+          # トリガー(変更履歴の記録)を動かさずに入れる。先に新しい側を空にするので、何度やり直しても同じ結果になる。
+          {
+            echo "set session_replication_role = replica;"
+            echo "truncate ${list%,};"
+            cat "$RUNNER_TEMP/data.sql"
+          } | psql "$NEW" -q -v ON_ERROR_STOP=1 >/dev/null
+          rm -f "$RUNNER_TEMP/data.sql"
+          echo "データを写しました"
+
+      - name: 件数を比べる
+        run: |
+          set -euo pipefail
+          printf '%-32s %8s %8s\n' 表 今 新
+          for t in $TABLES; do
+            o=$(psql "$OLD" -qAt -c "select count(*) from public.$t")
+            n=$(psql "$NEW" -qAt -c "select count(*) from public.$t" 2>/dev/null || echo '-')
+            mark=$([ "$o" = "$n" ] && echo "" || echo "  ←違う")
+            printf '%-32s %8s %8s%s\n' "$t" "$o" "$n" "$mark"
+          done
